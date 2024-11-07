@@ -1,0 +1,1067 @@
+---
+title: "Code for Analyses"
+output:
+    pdf_document:
+        toc: yes
+        toc_depth: 4    
+        latex_engine: xelatex
+        keep_tex: true
+geometry: margin=1in 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=F)
+```
+
+# 1. Preparations
+
+Load data
+```{r}
+IBD.original <- read.csv2('./HL_DHL_data.csv')
+```
+
+Select columns of relevance and define categorical vectors for summary
+
+```{r, message=FALSE}
+library(dplyr)
+IBD <- IBD.original[, c(2:3, 5:7, 9:15, 20:22, 25, 
+                        31, 35:42, 54, 63, 67:82, 119)]
+# Recode nominal variables to binary variables
+IBD$native_language <- ifelse(IBD$native_language %in% c(0, 7, 14, 19), 0, 1)
+IBD$ASA_5 <- ifelse(IBD$ASA_5 %in% c(1:3), 1, 0)
+# Reduce categories according to Montreal classification (L4 and B4 for CD)
+IBD <- IBD %>%
+  mutate(CD_localisation = case_when(CD_localisation %in% 4:7 ~ 4,
+                                     TRUE ~ CD_localisation))
+IBD <- IBD %>%
+  mutate(CD_behaviour = case_when(CD_behaviour %in% 4:6 ~ 4,
+                                  TRUE ~ CD_behaviour))
+# Define categorical variables
+categorical <- c("gender", "education", "marital_status", "work_status", 
+                 "native_language", "diagnose", "surgery", "UC_localisation", 
+                 "CD_localisation", "CD_behaviour", "IBD_disease_activity", 
+                 "treatment", "ASA_5", "immunosuppressive", "biological", 
+                 "corticosteroids", "EQ5D_mobility", "EQ5D_self_care", 
+                 "EQ5D_usual_activities", "EQ5D_pain_discomfort", 
+                 "EQ5D_anxiety_depression")
+for (variable_name in categorical) {
+  IBD[, variable_name] <- as.factor(IBD[, variable_name])
+}
+# View summary for the total data set and for each of the diagnoses 
+CD <- subset(IBD, diagnose == 1)
+UC <- subset(IBD, diagnose == 2)
+summary(IBD)
+summary(CD)
+summary(UC)
+```
+
+## KNN imputation of missing values
+(leaving out OMAS-37 due to MNAR)
+```{r}
+library(impute)
+IBD <- as.matrix(IBD)
+IBD.imputed <- impute.knn(IBD[, -44])
+IBD.imp <- IBD.imputed$data
+IBD.imp <- as.data.frame(IBD.imp)
+IBD.imp[, 1:27] <- round(IBD.imp[, 1:27], digits = 0)
+for (variable_name in categorical) {
+  IBD.imp[, variable_name] <- as.factor(IBD.imp[, variable_name])
+}
+summary(IBD.imp)
+```
+
+## Preparations for canonical correlation analysis
+
+Select eligible continuous variables for each dataset (D.HL = health literacy and digital health literacy; CDP = clinical, demographic and PROM characteristics)
+
+```{r}
+CDP <- IBD.imp[, c(2, 8, 19, 25:27)]
+D.HL <- IBD.imp[, c(28:43)]
+```
+
+Control for multicollinearity
+
+```{r, message=FALSE}
+library(car)
+resp.Y <- rnorm(nrow(D.HL))
+modelY <- lm(resp.Y ~ ., data = D.HL)
+vif(modelY)
+resp.X <- rnorm(nrow(CDP))
+modelX <- lm(resp.X ~ ., data = CDP)
+vif(modelX)
+```
+
+Converting datasets to matrices with correct vector types
+
+```{r}
+CDP <- as.matrix(sapply(CDP, as.numeric))
+D.HL <- as.matrix(sapply(D.HL, as.numeric))
+```
+
+Standardize data to z-scores
+
+```{r}
+CDP <- scale(CDP)
+D.HL <- scale(D.HL)
+```
+
+# 2. Canonical correlation analysis
+
+```{r, message=FALSE}
+library(candisc)
+cca.out <- candisc::cancor(CDP, D.HL)
+# View results 
+cca.out 
+```
+
+## Permutation test over significant canonical correlations
+
+Initialise number of permutations and seed for reproducibility
+
+```{r}
+n.perm <- 10000 
+set.seed(0) 
+```
+
+Create list for storing permutations and vectors for visualizing permutation distributions
+
+```{r}
+perm.cancor <- vector("list", length = n.perm) 
+perm.cancor1 <- numeric()
+perm.cancor2 <- numeric()
+perm.cancor3 <- numeric()
+```
+
+Permute data
+
+```{r}
+for (i in 1:n.perm) {
+  perm.cancor[[i]] <- numeric()
+  Y.perm <- cca.out$Y[sample(nrow(cca.out$Y)), ] 
+  perm.cca <- candisc::cancor(cca.out$X, Y.perm) 
+  perm.cancor[[i]][1:3] <- perm.cca$cancor[1:3]  
+  perm.cancor1 <- c(perm.cancor1, perm.cancor[[i]][1])
+  perm.cancor2 <- c(perm.cancor2, perm.cancor[[i]][2])
+  perm.cancor3 <- c(perm.cancor3, perm.cancor[[i]][3])
+}
+```
+
+Compute p-value
+
+```{r}
+obs.3cancor <- cca.out$cancor[1:3] 
+p.values <- numeric(3)
+for (i in 1:3) {
+  obs.cancor <- obs.3cancor[i]
+  perm.cancors <- unlist(lapply(1:n.perm, function(p) perm.cancor[[p]][i]))
+  p.values[i] <- mean(perm.cancors >= obs.cancor) 
+}
+p.values
+```
+
+Visualize permutation distribution and empirical canonical correlation value
+
+```{r}
+par(mfrow=c(2 ,2))
+hist(perm.cancor1, breaks = 30, main = "perm.cancor1 null", 
+     xlim = range(c(perm.cancor1, obs.3cancor)))
+abline(v=obs.3cancor[1], col="red")
+text(obs.3cancor[1] - 0.2, 500, paste('p = ', round(p.values[1], 2)))
+hist(perm.cancor2, breaks = 30, main = "perm.cancor2 null", 
+     xlim = range(c(perm.cancor2, obs.3cancor)))
+abline(v=obs.3cancor[2], col="red")
+text(obs.3cancor[2] - 0.1, 500, paste('p = ', round(p.values[2], 2)))
+hist(perm.cancor3, breaks = 30, main = "perm.cancor3 null", 
+     xlim = range(c(perm.cancor3, obs.3cancor)))
+abline(v=obs.3cancor[3], col="red")
+text(obs.3cancor[3] + 0.1, 500, paste('p = ', round(p.values[3], 2)))
+```
+
+## 10-fold cross-validation of significant canonical correlations
+
+```{r, message=FALSE}
+library(caret)
+library(candisc)
+```
+
+Initalise settings
+
+```{r}
+XY <- IBD.imp[, c(2, 8, 19, 25:43)]
+XY <- as.matrix(sapply(XY, as.numeric))
+XY <- scale(XY)
+rep = 100
+k = 10
+set.seed(1)
+```
+
+Create empty vectors for iterations
+
+```{r}
+train.canR1 <- matrix(0, rep, k)
+train.canR2 <- matrix(0, rep, k)
+train.canR3 <- matrix(0, rep, k)
+test.canR1 <- matrix(0, rep, k)
+test.canR2 <- matrix(0, rep, k)
+test.canR3 <- matrix(0, rep, k)
+```
+
+repeat 10-fold cross-validation over 100 iterations
+
+```{r}
+for (i in 1:rep) {  
+  folds <- createFolds(XY[, 1], k = k)
+  for (j in 1:k) {
+    test.XY <- XY[folds[[j]], ]
+    train.XY <- XY[-folds[[j]], ]
+    Xtrain <- scale(train.XY[, 1:6])
+    Ytrain <- scale(train.XY[, 7:22])
+
+    trainCCA <- candisc::cancor(Xtrain, Ytrain)
+    
+    train.canR1[i, j] <- trainCCA$cancor[1]
+    train.canR2[i, j] <- trainCCA$cancor[2]
+    train.canR3[i, j] <- trainCCA$cancor[3]
+    
+    Xtest <- scale(test.XY[, 1:6], center = attr(Xtrain, "scaled:center"), 
+                   scale = attr(Xtrain, "scaled:scale"))
+    Ytest <- scale(test.XY[, 7:22], center = attr(Ytrain, "scaled:center"), 
+                   scale = attr(Ytrain, "scaled:scale"))
+    
+    test.canR1.X <- as.matrix(Xtest) %*% trainCCA$coef$X[, 1]
+    test.canR1.Y <- as.matrix(Ytest) %*% trainCCA$coef$Y[, 1]
+    test.canR1[i, j] <- cor(test.canR1.X, test.canR1.Y)
+    
+    test.canR2.X <- as.matrix(Xtest) %*% trainCCA$coef$X[, 2]
+    test.canR2.Y <- as.matrix(Ytest) %*% trainCCA$coef$Y[, 2]
+    test.canR2[i, j] <- cor(test.canR2.X, test.canR2.Y)
+    
+    test.canR3.X <- as.matrix(Xtest) %*% trainCCA$coef$X[, 3]
+    test.canR3.Y <- as.matrix(Ytest) %*% trainCCA$coef$Y[, 3]
+    test.canR3[i, j] <- cor(test.canR3.X, test.canR3.Y)
+  }
+}
+```
+
+View results
+
+```{r}
+mean(train.canR1) 
+mean(test.canR1) 
+
+mean(train.canR2) 
+mean(test.canR2) 
+
+mean(train.canR3) 
+mean(test.canR3) 
+```
+
+## Jackknife cross-validation of canonical structure correlations
+
+```{r, message=FALSE}
+library(candisc)
+library(foreach)
+library(doParallel)
+# Function to compute canonical variates: 
+predict.cancor <- function(cancor.obj, X, Y){
+  pred.X <- as.matrix(X) %*% cancor.obj$coef$X
+  pred.Y <- as.matrix(Y) %*% cancor.obj$coef$Y
+  pred.XY <- list(pred.X, pred.Y)
+  names(pred.XY) <- c("pred.X", "pred.Y")
+  return(pred.XY)
+}
+
+# Initialize parallel backend
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+
+# Create function to perform jackknife 
+njack <- nrow(CDP)
+jack.res <- foreach(i=1:njack) %dopar% {
+  model <- candisc::cancor(CDP[-i, ], D.HL[-i, ])
+  selected.vars <- model$names$X
+  # Ensure CDP[i, selected.vars] is properly formatted
+  X.test <- CDP[i, selected.vars, drop = FALSE]
+  Y.test <- D.HL[i, , drop = FALSE]
+  
+  prediction <- predict.cancor(model, X.test, Y.test)
+  list(prediction, model)
+  }
+
+# Load jackknife
+jack.results <- lapply(jack.res, function(x){return(x[[1]])})
+jack.X <- lapply(jack.results, function(x){return(x[[1]])})
+jack.X <- as.data.frame(do.call(rbind, jack.X))
+jack.Y <- lapply(jack.results, function(x){return(x[[2]])})
+jack.Y <- as.data.frame(do.call(rbind, jack.Y))
+
+# Retrieve loadings from saved jackknife models
+jack.models <- lapply(jack.res, function(x){return(x[[2]])})
+jack.loadings1 <- lapply(jack.models, function(model){
+  return(model$structure$Y.yscores[,1])
+})
+jack.loadings2 <- lapply(jack.models, function(model){
+  return(model$structure$Y.yscores[,2])
+  })
+jack.loadings1 <- as.data.frame(do.call(rbind, jack.loadings1))
+jack.loadings2 <- as.data.frame(do.call(rbind, jack.loadings2))
+
+# Stop parallel backend
+stopCluster(cl)
+```
+
+Plot jackknife results for first and second canonical variate
+
+```{r, message=FALSE, fig.width=12, fig.height=8}
+library(reshape)
+melted.loadings1 <- melt(jack.loadings1)
+melted.loadings2 <- melt(jack.loadings2)
+
+par(mfrow=c(2,2), las=1, mai=c(1.02, 1.3, 0.82, 0.42))
+boxplot(abs(value) ~ variable, data=melted.loadings1, horizontal=T)
+plot(abs(melted.loadings1$value), 
+     jitter(as.numeric(melted.loadings1$variable)), 
+     pch='.')
+boxplot(abs(value) ~ variable, data=melted.loadings2, horizontal=T)
+plot(abs(melted.loadings2$value), 
+     jitter(as.numeric(melted.loadings2$variable)), 
+     pch='.')
+```
+
+Compute SD for all variables' loadings over all jackknife iterations
+
+```{r}
+jack.loadings1.sd <- apply(jack.loadings1, 2, sd)
+jack.loadings2.sd <- apply(jack.loadings2, 2, sd)
+
+# View mean and SD
+colMeans(jack.loadings1)
+jack.loadings1.sd
+
+colMeans(jack.loadings2)
+jack.loadings2.sd
+```
+
+## Interpretation of canonical correlation analysis
+
+Focusing on first and second canonical correlation due to low performance on third canonical correlation in 10-fold cross-validation
+
+```{r}
+cca.out$cancor[1:2]
+```
+
+Inspect redundancy
+
+```{r}
+library(candisc)
+candisc::redundancy(cca.out)
+```
+
+Inspect linear relationship from each variable in each data set to the canonical correlation
+
+```{r}
+cca.out$structure$X.xscores[, 1]
+cca.out$structure$X.yscores[, 1]
+cca.out$structure$Y.yscores[, 1]
+cca.out$structure$Y.xscores[, 1]
+
+cca.out$structure$X.xscores[, 2]
+cca.out$structure$X.yscores[, 2]
+cca.out$structure$Y.yscores[, 2]
+cca.out$structure$Y.xscores[, 2]
+```
+
+# 3. Hierarchical cluster analysis of covariance patterns identified in the two first pairs of canonical variates
+
+Initiate cluster analysis by creating objects to store scores for CDP and D.HL data sets
+
+```{r}
+scores.CDP1 <- cca.out$X %*% cca.out$coef$X[, 1]
+scores.DHL1 <- cca.out$Y %*% cca.out$coef$Y[, 1]
+scores.CDP2 <- cca.out$X %*% cca.out$coef$X[, 2]
+scores.DHL2 <- cca.out$Y %*% cca.out$coef$Y[, 2]
+```
+
+Control whether the correlation between the variates (scores) match the canonical correlations
+
+```{r}
+cor(scores.CDP1, scores.DHL1)
+cor(scores.CDP2, scores.DHL2)
+```
+
+Prepare data
+
+```{r}
+data <- data.frame(hcscores.X1 = scores.CDP1, 
+                   hcscores.Y1 = scores.DHL1, 
+                   hcscores.X2 = scores.CDP2, 
+                   hcscores.Y2 = scores.DHL2)
+data.sc <- scale(data)
+```
+
+Define distance measures and linkage methods
+
+```{r}
+distances <- c("euclidean", "maximum", "manhattan", "canberra", "binary", "minkowski")
+linkages<- c("average", "single", "complete", "ward")
+```
+
+Create function to evaluate different agglomerative coefficients with different measures of distance
+
+```{r}
+library(cluster)
+clustEv <- function(dist.m, link.m) {
+  dist.m <- dist(data.sc, method = dist.m)
+  res.agnes <- agnes(dist.m, method = link.m)
+  return(res.agnes$ac)
+}
+```
+
+Inspect agglomerative coefficient for different combinations of distance measures and linkage methods
+
+```{r}
+library(dplyr)
+set.seed(2)
+res <- expand.grid(distance = distances, linkage = linkages) %>%
+  rowwise() %>%
+  mutate(ac = clustEv(distance, linkage)) %>%
+  ungroup()
+
+res
+```
+
+Run hierarchical clustering
+
+```{r}
+dist.m <- dist(data.sc, method = "manhattan")
+hclust.res <- hclust(dist.m, method = "ward.D")
+```
+
+View dendrogram
+
+```{r}
+plot(hclust.res, hang = -1, cex = 0.5)
+```
+
+Refine predict.cancor() function for CH and SH index
+
+```{r}
+predict.cancor <- function(cancor.obj) {
+  pred.X <- cancor.obj$X %*% cancor.obj$coef$X
+  pred.Y <- cancor.obj$Y %*% cancor.obj$coef$Y
+  pred.XY <- list(pred.X,pred.Y)
+  names(pred.XY) <- c("pred.X", "pred.Y")
+  return(pred.XY)
+}
+
+canR <- predict.cancor(cca.out)
+cca.data <- as.data.frame(cbind(canR$pred.X[, 1], canR$pred.X[, 2]))
+```
+
+Inspect CH and SH index
+
+```{r}
+library(NbClust)
+hcfit.ch <- NbClust(cca.data, distance = "manhattan", method = "ward.D",
+                    min.nc = 1, max.nc = 6, index = "ch")
+hcfit.sl <- NbClust(cca.data, distance = "manhattan", method = "ward.D",
+                    min.nc = 1, max.nc = 6, index = "silhouette")
+
+par(mfrow = c(1,2))
+plot(names(hcfit.ch$All.index), hcfit.ch$All.index,
+     main = "variance ratio criterion\n (Calinski-Harabasz index)",
+     xlab = "Number of clusters", ylab = "Variance ratio criterion", type = 'b')
+plot(names(hcfit.sl$All.index), hcfit.sl$All.index,
+     main = "Silhouette", xlab = "Number of clusters", ylab = "Silhouette", type = 'b')
+```
+
+Cut tree at numbers of clusters indicated by CH and SH index 
+
+```{r}
+cut.sh <- cutree(hclust.res, k = 2)
+cut.ch <- cutree(hclust.res, k = 6)
+```
+
+## Stability of clusters defined by CH and SH index
+
+Jaccard Similarity Index over bootstrapp samples against original canonical pair of variates
+
+```{r}
+library(fpc)
+# Define clustering method for clusterboot()-function
+hclust.manhattan <- function(x, k) {
+  dist.matrix <- dist(x, method = "manhattan")
+  dist.m <- as.matrix(dist.m)
+  hc <- hclust(dist.matrix, method = "ward.D")
+  clusters <- cutree(hc, k = k)
+  clusterlist <- lapply(1:k, function(i) clusters == i)
+  list(
+    result = hc,
+    nc = k,
+    clusterlist = clusterlist,
+    partition = clusters,
+    clustermethod = "hierarchical"
+  )
+}
+```
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+# Compute mean JSI over 1000 bootstrap samples
+clustboot.sh <- clusterboot(cca.data, B=1000, bootmethod = "boot", 
+                                            clustermethod = hclust.manhattan, 
+                                            k = 2, count=TRUE)
+clustboot.ch <- clusterboot(cca.data, B=1000, bootmethod = "boot", 
+                                            clustermethod = hclust.manhattan, 
+                                            k = 6, count=TRUE) 
+```
+
+```{r}
+# View results
+clustboot.sh$bootmean
+clustboot.ch$bootmean
+```
+
+## Significance of clusters defined by CH and SH index
+
+Create function that performs hierarchical clustering and returns the highest clustering indexes
+
+```{r}
+library(NbClust)
+cluster.test <- function(cca){
+  hcfit <- NbClust::NbClust(cca, distance = "manhattan", method = "ward.D", 
+                            index = "ch", min.nc = 2, max.nc = 6)
+  CH.index <- max(hcfit$All.index)
+  hcfit <- NbClust::NbClust(cca, distance = "manhattan", method = "ward.D", 
+                            index = "silhouette", min.nc = 2, max.nc = 6)
+  sil.index <- max(hcfit$All.index)
+  return(c("CH"=CH.index, "Silhouette"=sil.index))
+}
+```
+
+Fit a multivariate normal distribution to the original data
+
+```{r}
+sigma <- cov(cca.data)
+mu <- colMeans(cca.data)
+real.CI <- cluster.test(cca.data)
+```
+
+Repeatedly perform parallel hierarchical clustering on resamples to create null distribution of clustering indices
+
+```{r, message=FALSE}
+library(parallel)
+library(MASS)
+null.CI <- list()
+n.sims <- 1999
+n.cores <- detectCores() - 1 
+cl <- makeCluster(n.cores)
+clusterExport(cl, c("mvrnorm", "mu", "sigma", "nrow", "cca.data", "cluster.test"))
+
+null.CI <- parLapply(cl, 1:n.sims, function(i) {
+  set.seed(3 + i) 
+  rand.sample <- mvrnorm(n = nrow(cca.data), mu = mu, Sigma = sigma)
+  cluster.test(rand.sample)
+})
+
+stopCluster(cl)
+null.CI <- as.data.frame(do.call(rbind, null.CI))
+```
+
+print p-values
+
+```{r}
+rank.cv1 <- sum(real.CI[1] < null.CI[, 1]) +1
+pval.cv1 <- rank.cv1 / (n.sims+1)
+
+rank.cv2 <- sum(real.CI[2] < null.CI[, 2]) + 1
+pval.cv2 <- rank.cv2 / (n.sims + 1)
+
+t(t(c("p.val variance ratio" = pval.cv1, "p.val Silhouette" = pval.cv2)))
+```
+
+Visualize p-values
+
+```{r}
+par(mfrow=c(1,2))
+hist(null.CI[,1], breaks = 30, main = "variance ratio criterion null")
+abline(v=real.CI[1], col="red")
+text(real.CI[1] + 10, 70, paste('p = ', round(pval.cv1, 2)))
+
+hist(null.CI[,2], breaks = 30, main = "Silhouette null")
+abline(v=real.CI[2], col="red")
+text(real.CI[2] - 0.025, 80, paste('p = ', round(pval.cv2, 2)))
+```
+
+Selecting 2 clusters to merge with data as this appears most stable according to JSI and silhouette
+
+```{r}
+library(dplyr)
+data <- mutate(data, Cluster = cut.sh)
+CCA.cluster <- cbind(IBD, data)
+```
+
+# 4. Comparance between clusters
+
+## Refine data for further analysis
+
+```{r}
+CCA.cluster$OMAS_37 <- IBD.original$OMAS37_sum
+# Define categorical variables
+categorical <- c("gender", "education", "marital_status", "work_status", 
+                 "native_language", "diagnose", "surgery", "UC_localisation", 
+                 "CD_localisation", "CD_behaviour", "IBD_disease_activity", 
+                 "treatment", "ASA_5", "immunosuppressive", "biological", 
+                 "corticosteroids", "EQ5D_mobility", "EQ5D_self_care", 
+                 "EQ5D_usual_activities", "EQ5D_pain_discomfort", 
+                 "EQ5D_anxiety_depression", "Cluster")
+for (variable.name in categorical) {
+  CCA.cluster[, variable.name] <- as.factor(CCA.cluster[, variable.name])
+}
+# Define values for categorical variables
+CCA.cluster$gender <- factor(
+  CCA.cluster$gender, levels = c(1:2), 
+  labels = c("Female" ,"Male")
+  )
+
+CCA.cluster$education <- factor(
+  CCA.cluster$education, levels = c(0:3), 
+  labels = c("Elementary school", "Secondary school", 
+             "University college or university, up to 4 years", 
+             "University college or university, over 5 years"), 
+  ordered = TRUE
+  )
+
+CCA.cluster$marital_status <- factor(
+  CCA.cluster$marital_status, 
+  levels = c(0:1), 
+  labels = c("Single", "In a relationship")
+  )
+
+CCA.cluster$work_status <- factor(
+  CCA.cluster$work_status, levels = c(0:1), 
+  labels = c("Not working", "Working")
+  )
+
+CCA.cluster$native_language <- factor(
+  CCA.cluster$native_language, 
+  levels = c(0:1), 
+  labels = c("Norwegian", "Other language")
+  )
+
+CCA.cluster$diagnose <- factor(
+  CCA.cluster$diagnose, levels = c(1:2), 
+  labels = c("Crohn's disease", "Ulcerative colitis")
+  )
+
+CCA.cluster$surgery <- factor(
+  CCA.cluster$surgery, levels = c(0:1), 
+  labels = c("No surgery", "Surgery")
+  )
+
+CCA.cluster$UC_localisation <- factor(
+  CCA.cluster$UC_localisation, 
+  levels = c(0:3), 
+  labels = c("NA", "Ulcerative proctitis", "Left-sided UC", "Extensive UC")
+  )
+
+CCA.cluster$CD_localisation <- factor(
+  CCA.cluster$CD_localisation, 
+  levels = c(0:4), 
+  labels = c("NA", "Ileal", "Colonic", 
+             "Ileocolonic", "Upper tract only or modifier")
+  )
+
+CCA.cluster$CD_behaviour <- factor(
+  CCA.cluster$CD_behaviour, levels = c(0:4), 
+  labels = c("NA", "Non-stricturing, non-penetrating", 
+             "Stricturing", "Penetrating", "Perianal disease")
+  )
+
+CCA.cluster$IBD_disease_activity <- factor(
+  CCA.cluster$IBD_disease_activity, levels = c(0:1), 
+  labels = c("Below treshold", "Over treshold")
+  )
+
+CCA.cluster$treatment <- factor(
+  CCA.cluster$treatment, levels = c(0:1), 
+  labels = c("No", "Yes")
+  )
+
+CCA.cluster$ASA_5 <- factor(
+  CCA.cluster$ASA_5, levels = c(0:1), 
+  labels = c("No", "Yes")
+  )
+
+CCA.cluster$immunosuppressive <- factor(
+  CCA.cluster$immunosuppressive, 
+  levels = c(0:1), labels = c("No", "Yes")
+  )
+
+CCA.cluster$biological <- factor(
+  CCA.cluster$biological, levels = c(0:1), 
+  labels = c("No", "Yes")
+  )
+
+CCA.cluster$corticosteroids <- factor(
+  CCA.cluster$corticosteroids, levels = c(0:1), 
+  labels = c("No", "Yes")
+  )
+
+CCA.cluster$EQ5D_mobility <- factor(
+  CCA.cluster$EQ5D_mobility, levels = c(1:4), 
+  labels = c("No problems", "Slight problems", 
+             "Moderate problems", "Severe problems"),
+  ordered = TRUE)
+
+CCA.cluster$EQ5D_self_care <- factor(
+  CCA.cluster$EQ5D_self_care, levels = c(1:4), 
+  labels = c("No problems", "Slight problems", 
+             "Moderate problems", "Severe problems"),
+  ordered = TRUE)
+
+CCA.cluster$EQ5D_usual_activities <- factor(
+  CCA.cluster$EQ5D_usual_activities, levels = c(1:5), 
+  labels = c("No problems", "Slight problems", "Moderate problems", 
+             "Severe problems", "Unable to do"), ordered = TRUE)
+
+CCA.cluster$EQ5D_pain_discomfort <- factor(
+  CCA.cluster$EQ5D_pain_discomfort, levels = c(1:5), 
+  labels = c("None", "Slight", "Moderate", "Severe", "Extreme"), 
+  ordered = TRUE)
+
+CCA.cluster$EQ5D_anxiety_depression <- factor(
+  CCA.cluster$EQ5D_anxiety_depression, levels = c(1:5), 
+  labels = c("None", "Slight", "Moderate", "Severe", "Extreme"), 
+  ordered = TRUE)
+```
+
+Summary of variables within each cluster
+
+```{r}
+Cluster.1 <- subset(CCA.cluster, Cluster == 1)
+Cluster.2 <- subset(CCA.cluster, Cluster == 2)
+summary(Cluster.1)
+summary(Cluster.2)
+```
+
+## Comparance between clusters for variables excluded from CCA and hierarchical clustering
+
+Extract external variables
+
+```{r}
+ext.IBD <- subset(CCA.cluster, select = c(gender, education, marital_status, work_status,
+                                          native_language, diagnose, surgery, 
+                                          UC_localisation, CD_localisation, CD_behaviour,
+                                          IBD_disease_activity, treatment, ASA_5,
+                                          immunosuppressive, biological, corticosteroids,
+                                          EQ5D_mobility, EQ5D_self_care,
+                                          EQ5D_usual_activities, EQ5D_pain_discomfort,
+                                          EQ5D_anxiety_depression, OMAS_37, Cluster))
+```
+
+### Bivariate analyes
+
+Permuted t-test of continuous variable
+
+```{r, message=FALSE}
+library(MKinfer)
+library(dplyr)
+
+ext.na <- na.omit(ext.IBD)
+ext.na %>% 
+  group_by(Cluster) %>% 
+  summarise(mean.OMAS_37 = mean(OMAS_37), sd.OMAS_37 = sd(OMAS_37))
+set.seed(4)
+perm.t.OMAS <- perm.t.test(OMAS_37 ~ Cluster, R = 10000, data = ext.na)
+perm.t.OMAS
+```
+
+Chi-square/Fisher's test for nominal variables
+
+```{r, warning=FALSE}
+ext.nom <- subset(ext.IBD, select = c(gender, marital_status, work_status, 
+                                      native_language, diagnose, surgery, 
+                                      UC_localisation, CD_localisation, 
+                                      CD_behaviour, IBD_disease_activity, 
+                                      treatment, ASA_5, immunosuppressive, 
+                                      biological, corticosteroids, Cluster))
+
+nom.vars <- names(ext.nom)
+nom.vars <- nom.vars[-16]
+
+# Create empty lists to store results
+test.stat <- list()
+p.val <- numeric()
+
+# Designate variables to Chi-square/Fisher test depending on contingency table
+
+for (i in 1:length(nom.vars)) {
+   cat.tab <- table(ext.nom[, i], ext.nom$Cluster)
+  if (any(cat.tab < 5)) {
+    fisher <- fisher.test(cat.tab, workspace = 2e8, hybrid = T)
+    test.stat[[i]] <- fisher
+    p.val[i] <- fisher$p.value
+  } else {
+    chisq <- chisq.test(cat.tab)
+    test.stat[[i]] <- chisq
+    p.val[i] <- chisq$p.value
+  }
+}
+
+# Give corresponding names in list
+names(test.stat) <- nom.vars
+
+# Adjust p-values with Hochberg correction
+adj.p <- p.adjust(p.val, method = "hochberg")
+
+# View significant results and adjusted p-value
+sig.chi <- test.stat[adj.p < .05] 
+sig.p <- adj.p[adj.p < .05]
+sig.chi
+sig.p
+# Lower threshold for considering variables into logistic model
+mod.chi <- test.stat[adj.p < .1]
+mod.chi
+```
+
+Repeat procedure with Kruskal-Wallis test for ordinal variables
+
+```{r}
+ext.ord <- subset(ext.IBD, select = c(education, EQ5D_mobility, EQ5D_self_care,
+                                      EQ5D_usual_activities, EQ5D_pain_discomfort,
+                                      EQ5D_anxiety_depression, Cluster))
+
+ord.vars <- names(ext.ord)
+ord.vars <- ord.vars[-7]
+
+kw.test <- list()
+kw.p <- numeric()
+
+for (i in 1:length(ord.vars)) {
+  kw <- kruskal.test(Cluster ~ ext.ord[, i], data = ext.ord)
+  kw.test[[i]] <- kw
+  kw.p[i] <- kw$p.value
+}
+
+names(kw.test) <- ord.vars
+kw.p.adj <- p.adjust(kw.p, method = "hochberg")
+sig.kw <- kw.test[kw.p.adj < .05]
+sig.kw.p <- kw.p.adj[kw.p.adj < .05]
+sig.kw
+sig.kw.p
+mod.kw <- kw.test[kw.p.adj < .1]
+mod.kw
+```
+
+### Binomial logistic model for cluster membership
+
+Prepare data
+
+```{r}
+library(car)
+
+# Assess multicollinearity
+response <- rnorm(nrow(ext.IBD))
+mc <- lm(response ~., data = ext.IBD)
+## vif(mc)
+## Error in vif.default(mc) : there are aliased coefficients in the model
+alias(mc)
+#remove CD_localisation
+ext.IBD <- subset(ext.IBD, select = - CD_localisation)
+response <- rnorm(nrow(ext.IBD))
+mc <- lm(response ~., data = ext.IBD)
+vif(mc)
+# Remove UC_localisation and CD_behaviour
+ext.IBD <- subset(ext.IBD, select = -c(UC_localisation, CD_behaviour))
+response <- rnorm(nrow(ext.IBD))
+mc <- lm(response ~., data = ext.IBD)
+vif(mc)
+
+# View summary
+summary(ext.IBD)
+```
+
+Build model including significant variables from bivariate analysis
+
+```{r}
+glm.fit0 <- glm(Cluster ~ work_status + IBD_disease_activity + biological + 
+                  education + EQ5D_mobility + EQ5D_self_care + 
+                  EQ5D_usual_activities + EQ5D_pain_discomfort + 
+                  EQ5D_anxiety_depression + OMAS_37, 
+                data = ext.IBD, family = binomial(link = "logit"))
+summary(glm.fit0)
+```
+
+Model is showing signs of complete separation in EQ5D-variables -\> Recoding EQ5D-variables:
+
+```{r}
+library(dplyr)
+ext.IBD <- ext.IBD %>%
+  mutate(EQ5D_mobility = case_when(
+    EQ5D_mobility %in% c("No problems", 
+                         "Slight problems") ~ "None or slight problems",
+    EQ5D_mobility == "Moderate problems" ~ "Moderate problems",
+    EQ5D_mobility %in% c("Severe problems") ~ "Severe problems"
+  ))
+ext.IBD$EQ5D_mobility <- factor(
+  ext.IBD$EQ5D_mobility, 
+  levels = c("None or slight problems", 
+             "Moderate problems", 
+             "Severe problems"), 
+  ordered = TRUE)
+
+ext.IBD <- ext.IBD %>%
+  mutate(EQ5D_self_care = case_when(
+    EQ5D_self_care %in% c("No problems", 
+                          "Slight problems") ~ "None or slight problems",
+    EQ5D_self_care == "Moderate problems" ~ "Moderate problems",
+    EQ5D_self_care %in% c("Severe problems") ~ "Severe problems"
+  ))
+ext.IBD$EQ5D_self_care <- factor(
+  ext.IBD$EQ5D_self_care, 
+  levels = c("None or slight problems", 
+             "Moderate problems",
+             "Severe problems"), 
+  ordered = TRUE)
+
+ext.IBD <- ext.IBD %>%
+  mutate(EQ5D_usual_activities = case_when(
+    EQ5D_usual_activities %in% c("No problems", 
+                                 "Slight problems") ~ "None or slight problems",
+    EQ5D_usual_activities == "Moderate problems" ~ "Moderate problems",
+    EQ5D_usual_activities %in% c("Severe problems") ~ "Severe problems"
+  ))
+ext.IBD$EQ5D_usual_activities <- factor(
+  ext.IBD$EQ5D_usual_activities, 
+  levels = c("None or slight problems", 
+             "Moderate problems", 
+             "Severe problems"), 
+  ordered = TRUE)
+
+
+ext.IBD <- ext.IBD %>%
+  mutate(EQ5D_pain_discomfort = case_when(
+    EQ5D_pain_discomfort %in% c("None", 
+                                "Slight") ~ "None or slight",
+    EQ5D_pain_discomfort == "Moderate" ~ "Moderate",
+    EQ5D_pain_discomfort %in% c("Severe", 
+                                "Extreme") ~ "Severe or extreme"
+  ))
+ext.IBD$EQ5D_pain_discomfort <- factor(
+  ext.IBD$EQ5D_pain_discomfort, 
+  levels = c("None or slight",
+             "Moderate", 
+             "Severe or extreme"), 
+  ordered = TRUE)
+
+ext.IBD <- ext.IBD %>%
+  mutate(EQ5D_anxiety_depression = case_when(
+    EQ5D_anxiety_depression %in% c("None",
+                                   "Slight") ~ "None or slight",
+    EQ5D_anxiety_depression == "Moderate" ~ "Moderate",
+    EQ5D_anxiety_depression %in% c("Severe", 
+                                   "Extreme") ~ "Severe or extreme"
+  ))
+ext.IBD$EQ5D_anxiety_depression <- factor(
+  ext.IBD$EQ5D_anxiety_depression, 
+  levels = c("None or slight", 
+             "Moderate", 
+             "Severe or extreme"), 
+  ordered = TRUE)
+
+summary(ext.IBD)
+```
+
+Repeat model fit
+
+```{r}
+glm.fit1 <- glm(Cluster ~ work_status + IBD_disease_activity + biological + 
+                  education + EQ5D_mobility + EQ5D_self_care + 
+                  EQ5D_usual_activities + EQ5D_pain_discomfort + 
+                  EQ5D_anxiety_depression + OMAS_37, 
+                data = ext.IBD, family = binomial(link = "logit"))
+summary(glm.fit1)
+```
+
+Remove problematic variables
+
+```{r}
+glm.fit2 <- glm(Cluster ~ work_status + IBD_disease_activity + biological + 
+                  education + EQ5D_usual_activities + EQ5D_pain_discomfort +
+                  EQ5D_anxiety_depression + OMAS_37, 
+                data = ext.IBD, family = binomial(link = "logit"))
+summary(glm.fit2)
+confint(glm.fit2)
+```
+
+View diagnostics
+
+```{r}
+library(car)
+vif.glm <- vif(glm.fit2)
+cat("Variance inflation factor:\n")
+vif.glm
+lev <- hatvalues(glm.fit2)
+avg.lev <- mean(lev)
+high <- avg.lev*3
+high.lev <- which(lev > high)
+cat("\nLeverage three times greater than mean leverage:\n")
+lev[high.lev]
+library(car)
+n = nrow(ext.IBD)
+cooks <- cooks.distance(glm.fit2)
+critical <- which(cooks > 4/n)
+cat("\nCook's distance above 4/N:\n")
+cooks[critical]
+```
+
+10-fold CV to assess model performance
+
+```{r, message=FALSE, warning=FALSE}
+library(caret)
+library(doParallel) 
+library(pROC)
+
+set.seed(5)
+# Define labels for caret::train()
+ext.IBD$Cluster <- factor(ext.IBD$Cluster, labels = c("Cluster_1", "Cluster_2"))
+# Removing missing values for cross-validation
+ext.na <- na.omit(ext.IBD)
+
+cl <- makeCluster(detectCores()-1)
+registerDoParallel(cl)
+ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 100, 
+                     classProbs = TRUE, summaryFunction = twoClassSummary, 
+                     savePredictions = TRUE)
+glm.model <- train(Cluster ~ work_status + IBD_disease_activity + biological + 
+                     education + EQ5D_usual_activities + EQ5D_pain_discomfort + 
+                     EQ5D_anxiety_depression + OMAS_37, data = ext.na, 
+                   method = "glm", family = binomial(link = "logit"), 
+                   trControl = ctrl)
+stopCluster(cl)
+
+glm.model
+
+cat("Standard deviation for ROC-AUC:\n", sd(glm.model$resample$ROC))
+cat("\nStandard error for ROC-AUC:\n", sd(glm.model$resample$ROC) /
+      sqrt(length(glm.model$resample$ROC)))
+
+# plot
+preds <- glm.model$pred
+roc.curve <- roc(preds$obs, preds$Cluster_2)
+plot(roc.curve, col = "red")
+```
+
+Permutation test of model
+
+```{r, message=FALSE}
+library(coin)
+perm.glm <- independence_test(Cluster ~ gender + work_status + 
+                                IBD_disease_activity + biological + 
+                                EQ5D_mobility + EQ5D_pain_discomfort + 
+                                EQ5D_anxiety_depression, data = ext.IBD, 
+                              teststat = "maximum", 
+                              distribution = approximate(nresample = 10000))
+
+pvalue(perm.glm)
+```
